@@ -237,6 +237,10 @@ func initDB(ctx context.Context, dbPool *sql.DB) error {
 		return err
 	}
 	if _, err := dbPool.ExecContext(ctx,
+		`INSERT IGNORE INTO SeqCoord (id, next) VALUES (0, 0)`); err != nil {
+		return err
+	}
+	if _, err := dbPool.ExecContext(ctx,
 		`INSERT IGNORE INTO IntCoord (id, seq) VALUES (0, 0)`); err != nil {
 		return err
 	}
@@ -397,6 +401,71 @@ func (s *Storage) GetObjectData(ctx context.Context, obj string) ([]byte, int64,
 // Returns the sequence number assigned to the first entry in the batch, or an error.
 func (s *Storage) Sequence(ctx context.Context, leaf []byte) (uint64, error) {
 	return s.pool.Add(leaf)
+}
+
+// NextAvailable returns the next available unassigned index.
+func (s *Storage) NextAvailable(ctx context.Context) (uint64, error) {
+	r := s.dbPool.QueryRowContext(ctx, "SELECT id, next FROM SeqCoord WHERE id = ?", 0)
+
+	var id, next uint64
+	if err := r.Scan(&id, &next); err == sql.ErrNoRows {
+		return 0, fmt.Errorf("init new log in seqcoord: %v", err)
+	} else if err != nil {
+		return 0, fmt.Errorf("failed to read seqcoord: %v", err)
+	}
+
+	return next, nil
+}
+
+// AddSequenced commits leaves to the log starting at the index of startSeq.
+func (s *Storage) AddSequenced(ctx context.Context, startSeq uint64, leaves [][]byte) error {
+	batch := writer.Batch{
+		Entries: leaves,
+	}
+
+	b := &bytes.Buffer{}
+	e := gob.NewEncoder(b)
+	if err := e.Encode(batch); err != nil {
+		return fmt.Errorf("failed to serialise batch: %v", err)
+	}
+	data := b.Bytes()
+	num := len(batch.Entries)
+
+	tx, err := s.dbPool.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin tx: %v", err)
+	}
+	defer func() {
+		if tx != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Check that the start index of the leaves provided is consistent with the
+	// next unassigned sequence number.
+	r := tx.QueryRowContext(ctx, "SELECT id, next FROM SeqCoord WHERE id = ? FOR UPDATE", 0)
+	var id, next uint64
+	if err := r.Scan(&id, &next); err != nil {
+		return fmt.Errorf("failed to read seqcoord: %v", err)
+	}
+	if next != startSeq {
+		return fmt.Errorf("startSeq of AddSequenced call should match SeqCoord: got %d, want %d", startSeq, next)
+	}
+
+	// Add presequenced entries to Seq and update SeqCoord with the number of presequenced entries.
+	if _, err := tx.ExecContext(ctx, "INSERT INTO Seq(id, seq, v) VALUES(?, ?, ?)", 0, startSeq, data); err != nil {
+		return fmt.Errorf("insert into seq: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE SeqCoord SET next = ? WHERE ID = ?", startSeq+uint64(num), 0); err != nil {
+		return fmt.Errorf("update seqcoord: %v", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %v", err)
+	}
+	tx = nil
+
+	return nil
 }
 
 func (s *Storage) flushBatch(ctx context.Context, batch writer.Batch) (uint64, error) {
