@@ -338,17 +338,7 @@ func seqByHashPath(h []byte) string {
 // SequenceForLeafHash returns the sequence number associated with the provided leaf hash.
 // If no such leaf hash has (yet) been integrated into the log, os.ErrNotExist will be returned.
 func (s *Storage) SequenceForLeafHash(ctx context.Context, h []byte) (uint64, error) {
-	tx, err := s.dbPool.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer func() {
-		if tx != nil {
-			tx.Rollback()
-		}
-	}()
-
-	row := tx.QueryRowContext(ctx, "SELECT seq FROM Dedup WHERE hash = ?", h)
+	row := s.dbPool.QueryRowContext(ctx, "SELECT seq FROM Dedup WHERE hash = ?", h)
 	var seq uint64
 	if err := row.Scan(&seq); err == sql.ErrNoRows {
 		return 0, os.ErrNotExist
@@ -356,31 +346,13 @@ func (s *Storage) SequenceForLeafHash(ctx context.Context, h []byte) (uint64, er
 		return 0, fmt.Errorf("failed to read coord info: %v", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit: %v", err)
-	}
-
 	return seq, nil
 }
 
 // SetSequenceForLeafHash set a sequence number for the provided leaf hash.
 func (s *Storage) SetSequenceForLeafHash(ctx context.Context, h []byte, idx uint64) error {
-	tx, err := s.dbPool.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if tx != nil {
-			tx.Rollback()
-		}
-	}()
-
-	if _, err := tx.ExecContext(ctx, "INSERT IGNORE INTO Dedup (Hash, Seq) VALUES (?, ?)", h, idx); err != nil {
+	if _, err := s.dbPool.ExecContext(ctx, "INSERT IGNORE INTO Dedup (Hash, Seq) VALUES (?, ?)", h, idx); err != nil {
 		return fmt.Errorf("failed to store hash index: %v", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %v", err)
 	}
 
 	return nil
