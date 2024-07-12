@@ -351,6 +351,7 @@ func (s *Storage) SequenceForLeafHash(ctx context.Context, h []byte) (uint64, er
 
 // SetSequenceForLeafHash set a sequence number for the provided leaf hash.
 func (s *Storage) SetSequenceForLeafHash(ctx context.Context, h []byte, idx uint64) error {
+	klog.Infof("%+v", s.dbPool.Stats())
 	if _, err := s.dbPool.ExecContext(ctx, "INSERT IGNORE INTO Dedup (Hash, Seq) VALUES (?, ?)", h, idx); err != nil {
 		return fmt.Errorf("failed to store hash index: %v", err)
 	}
